@@ -1,0 +1,6 @@
+services:
+  - type: web
+    name: snowbowl-scraper
+    runtime: docker
+    plan: free
+    healthCheckPath: /
