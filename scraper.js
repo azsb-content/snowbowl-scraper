@@ -1,5 +1,150 @@
 const { chromium } = require('playwright');
 
+const CONDITIONS_URL = 'https://www.snowbowl.ski/the-mountain/weather-conditions-webcams/';
+const EVENTS_URL     = 'https://www.snowbowl.ski/events/';
+
+// ─── SNOW CONDITIONS ──────────────────────────────────────────────────────────
+async function scrapeConditions(page) {
+  await page.goto(CONDITIONS_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
+
+  try {
+    await page.waitForSelector('.m-snow-totals-table', { timeout: 10000 });
+  } catch (e) {
+    console.warn('  No snow totals table found — page may be summer layout');
+  }
+
+  const raw = await page.$$eval(
+    '.m-snow-totals-table.m-h-s.m-vp-top-m > div',
+    (items) => items.map((el) => ({
+      value: (el.querySelector('.m-snow-totals-top')?.innerText  || '').trim(),
+      label: (el.querySelector('.m-snow-totals-label')?.innerText || '').trim(),
+    }))
+  ).catch(() => []);
+
+  // Build parsed key/value map
+  const parsed = {};
+  raw.forEach(({ value, label }) => {
+    const key = label.toLowerCase().replace(/\s+/g, '_');
+    if (key) parsed[key] = value;
+  });
+
+  const announcement = await page.$eval(
+    '.m-alert-bar, .m-hero-text, [class*="announcement"], [class*="banner-text"]',
+    (el) => el?.innerText?.trim() || null
+  ).catch(() => null);
+
+  const operatingStatus = await page.$eval(
+    '[class*="operating"], [class*="status"], [class*="hours-of-operation"]',
+    (el) => el?.innerText?.trim() || null
+  ).catch(() => null);
+
+  return { raw, parsed, announcement, operatingStatus };
+}
+
+// ─── EVENTS ───────────────────────────────────────────────────────────────────
+async function scrapeEvents(page) {
+  await page.goto(EVENTS_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  await page.waitForTimeout(2500);
+
+  const events = await page.evaluate(() => {
+    const results = [];
+    const seen = new Set();
+
+    function clean(t) {
+      return (t || '').replace(/\s+/g, ' ').trim();
+    }
+    function text(root, ...sels) {
+      for (const s of sels) {
+        const el = root.querySelector(s);
+        if (el && el.innerText && el.innerText.trim()) return clean(el.innerText);
+      }
+      return '';
+    }
+
+    const containerSelectors = [
+      '.tribe-events-calendar-list__event-row',
+      '.tribe-events-calendar-month__calendar-event',
+      '.tribe-event',
+      '.tribe-events-loop .tribe-events-event',
+      '.m-event-item',
+      '[class*="event-item"]',
+      '[class*="event-card"]',
+      '[class*="event-listing"]',
+      'article.tribe_events_cat',
+      'article[class*="event"]',
+      '.events-archive article',
+      '.page article',
+    ];
+
+    let containers = [];
+    for (const sel of containerSelectors) {
+      const found = Array.from(document.querySelectorAll(sel));
+      if (found.length > 0) { containers = found; break; }
+    }
+
+    if (!containers.length) {
+      containers = Array.from(document.querySelectorAll('article')).filter(el => {
+        const t = el.innerText || '';
+        return /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|\d{1,2}\/\d{1,2})/i.test(t);
+      });
+    }
+
+    containers.forEach(el => {
+      const name = text(el,
+        '.tribe-event-url', '.tribe-events-list-event-title a',
+        '.tribe-events-calendar-list__event-title-link',
+        '.tribe-events-calendar-month__calendar-event-title-link',
+        'h1 a', 'h2 a', 'h3 a', 'h4 a',
+        '.event-title', '.m-event-title', '[class*="event-title"]',
+        'h1', 'h2', 'h3', 'h4'
+      );
+      if (!name || seen.has(name)) return;
+      seen.add(name);
+
+      const date = text(el,
+        '.tribe-event-date-start', '.tribe-events-schedule__datetime',
+        '.tribe-events-calendar-list__event-datetime',
+        'abbr.tribe-events-abbr', 'time',
+        '.event-date', '[class*="event-date"]', '[class*="event-time"]',
+        '.m-event-date'
+      );
+
+      const timeEl = el.querySelector('.tribe-events-schedule__datetime, [class*="event-time"], time');
+      const time = timeEl ? clean(timeEl.innerText) : '';
+
+      const price = text(el,
+        '.tribe-events-cost', '.tribe-ticket__price',
+        '[class*="event-cost"]', '[class*="event-price"]', '[class*="price"]'
+      );
+
+      const desc = text(el,
+        '.tribe-events-list-event-description p',
+        '.tribe-events-calendar-list__event-description p',
+        '.tribe-excerpt', '.event-description p',
+        '[class*="event-description"] p', '[class*="event-excerpt"]',
+        '.entry-summary p', '.entry-content p', 'p'
+      );
+
+      const linkEl = el.querySelector('a[href*="event"], h2 a, h3 a, h4 a, .tribe-event-url');
+      const link = linkEl ? linkEl.href : '';
+
+      results.push({ name, date, time, price, desc, link });
+    });
+
+    return results;
+  });
+
+  if (events.length) {
+    console.log(`  Found ${events.length} event(s)`);
+    events.forEach(e => console.log(`    - ${e.name} (${e.date})`));
+  } else {
+    console.warn('  No events found — returning empty array');
+  }
+
+  return events;
+}
+
+// ─── MAIN EXPORT ──────────────────────────────────────────────────────────────
 async function scrapeSnowReport() {
   const browser = await chromium.launch({
     headless: true,
@@ -8,57 +153,39 @@ async function scrapeSnowReport() {
 
   try {
     const page = await browser.newPage();
-    await page.goto('https://www.snowbowl.ski/the-mountain/weather-conditions-webcams/', {
-      waitUntil: 'domcontentloaded',
-      timeout: 30000
-    });
 
-    await page.waitForSelector('.m-snow-totals-table', { timeout: 15000 });
+    console.log(`[${new Date().toISOString()}] Scraping conditions...`);
+    const conditions = await scrapeConditions(page);
 
-    // Pull every value/label pair from the snow totals table
-    // This reads the EXACT text from the website — no interpretation
-    const raw = await page.$$eval(
-      '.m-snow-totals-table.m-h-s.m-vp-top-m > div',
-      (items) => items.map((el) => ({
-        value: (el.querySelector('.m-snow-totals-top') || {}).innerText?.trim() || '',
-        label: (el.querySelector('.m-snow-totals-label') || {}).innerText?.trim() || ''
-      }))
-    );
+    console.log(`[${new Date().toISOString()}] Scraping events...`);
+    const events = await scrapeEvents(page);
 
-    // Also grab any announcement/alert banner text
-    const announcement = await page.evaluate(() => {
-      // Try multiple selectors that Snowbowl might use for announcements
-      const selectors = [
-        '.m-alert-bar',
-        '.m-hero-text',
-        '[class*="announcement"]',
-        '[class*="alert"] p',
-        '.wp-block-heading'
-      ];
-      for (const sel of selectors) {
-        const el = document.querySelector(sel);
-        if (el && el.innerText.trim().length > 10) {
-          return el.innerText.trim();
-        }
-      }
-      return null;
-    });
-
-    return {
-      scrapedAt: new Date().toISOString(),
-      source: 'snowbowl.ski',
-      raw: raw,
-      announcement: announcement,
-      error: null
+    const output = {
+      scrapedAt:       new Date().toISOString(),
+      source:          'snowbowl.ski',
+      raw:             conditions.raw,
+      parsed:          conditions.parsed,
+      events,
+      error:           null,
     };
 
+    if (conditions.announcement)    output.announcement    = conditions.announcement;
+    if (conditions.operatingStatus) output.operatingStatus = conditions.operatingStatus;
+
+    console.log(`  Conditions fields: ${conditions.raw.length}`);
+    console.log(`  Events: ${events.length}`);
+
+    return output;
+
   } catch (err) {
+    console.error(`  Scrape error: ${err.message}`);
     return {
       scrapedAt: new Date().toISOString(),
-      source: 'snowbowl.ski',
-      raw: [],
-      announcement: null,
-      error: err.message
+      source:    'snowbowl.ski',
+      raw:       [],
+      parsed:    {},
+      events:    [],
+      error:     err.message,
     };
   } finally {
     await browser.close();
