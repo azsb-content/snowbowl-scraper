@@ -2,6 +2,7 @@ const { chromium } = require('playwright');
 
 const CONDITIONS_URL = 'https://www.snowbowl.ski/the-mountain/weather-conditions-webcams/';
 const EVENTS_URL     = 'https://www.snowbowl.ski/events/';
+const SUMMER_URL     = 'https://www.snowbowl.ski/summer/';
 
 // ─── SNOW CONDITIONS ──────────────────────────────────────────────────────────
 async function scrapeConditions(page) {
@@ -144,6 +145,46 @@ async function scrapeEvents(page) {
   return events;
 }
 
+// ─── SUMMER OPERATIONS ───────────────────────────────────────────────────────
+async function scrapeSummerOps(page) {
+  await page.goto(SUMMER_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  await page.waitForTimeout(1500);
+
+  const data = await page.evaluate(() => {
+    function clean(t) { return (t || '').replace(/\s+/g, ' ').trim(); }
+
+    const schedulePattern = /\b(open|available|daily|closed|starting|beginning|may|jun|jul|aug|sep|oct)\b/i;
+    const seen = new Set();
+    const scheduleLines = [];
+
+    document.querySelectorAll('h1,h2,h3,h4,h5,p,li,span').forEach(el => {
+      if (el.children.length > 3) return; // skip containers
+      const t = clean(el.innerText);
+      if (t.length < 10 || t.length > 200) return;
+      if (!schedulePattern.test(t)) return;
+      if (seen.has(t)) return;
+      seen.add(t);
+      scheduleLines.push(t);
+    });
+
+    // Pull out the most relevant lines
+    const gondolaLine = scheduleLines.find(l =>
+      /open\s+(may|daily|now)|scenic|gondola.*open|open.*gondola/i.test(l)
+    ) || scheduleLines.find(l => /open/i.test(l)) || '';
+
+    const sunsetLine = scheduleLines.find(l =>
+      /sunset|saturday|sunday|weekend/i.test(l)
+    ) || '';
+
+    return { scheduleLines: scheduleLines.slice(0, 12), gondolaLine, sunsetLine };
+  });
+
+  const isOpen = /open/i.test(data.gondolaLine) && !/closed/i.test(data.gondolaLine);
+  console.log(`  Summer ops — gondola: "${data.gondolaLine}" | isOpen: ${isOpen}`);
+
+  return { ...data, isOpen };
+}
+
 // ─── MAIN EXPORT ──────────────────────────────────────────────────────────────
 async function scrapeSnowReport() {
   const browser = await chromium.launch({
@@ -160,12 +201,16 @@ async function scrapeSnowReport() {
     console.log(`[${new Date().toISOString()}] Scraping events...`);
     const events = await scrapeEvents(page);
 
+    console.log(`[${new Date().toISOString()}] Scraping summer ops...`);
+    const summerOps = await scrapeSummerOps(page);
+
     const output = {
       scrapedAt:       new Date().toISOString(),
       source:          'snowbowl.ski',
       raw:             conditions.raw,
       parsed:          conditions.parsed,
       events,
+      summerOps,
       error:           null,
     };
 
