@@ -167,9 +167,13 @@ async function scrapeSummerOps(page) {
       scheduleLines.push(t);
     });
 
-    // Pull out the most relevant lines
+    // Pull out the most relevant lines — prioritise lines that start with or lead with "Open"
     const gondolaLine = scheduleLines.find(l =>
-      /open\s+(may|daily|now)|scenic|gondola.*open|open.*gondola/i.test(l)
+      /^open\b|open\s+(may|daily|now|today)/i.test(l)
+    ) || scheduleLines.find(l =>
+      /scenic.*gondola|gondola.*open|open.*gondola/i.test(l)
+    ) || scheduleLines.find(l =>
+      /scenic|gondola/i.test(l)
     ) || scheduleLines.find(l => /open/i.test(l)) || '';
 
     const sunsetLine = scheduleLines.find(l =>
