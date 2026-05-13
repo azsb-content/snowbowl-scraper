@@ -14,6 +14,15 @@ const CANVA_REDIRECT_URI  = process.env.CANVA_REDIRECT_URI
   || 'https://snowbowl-scraper.onrender.com/canva/callback';
 const BRAND_KIT = process.env.CANVA_BRAND_KIT || 'kAGecsp4l1c';
 
+// ─── LOOMLY CONFIG ────────────────────────────────────────────────────────────
+const LOOMLY_API_KEY     = process.env.LOOMLY_API_KEY     || '';
+const LOOMLY_CALENDAR_ID = process.env.LOOMLY_CALENDAR_ID || '573747';
+const LOOMLY_API         = 'https://api.loomly.com/v2';
+
+// Loomly cache (15 min)
+let loomlyCache = { posts: null, fetchedAt: 0 };
+const LOOMLY_CACHE_MS = 15 * 60 * 1000;
+
 // In-memory token store (persists across requests, resets on deploy)
 // For a permanent store: save CANVA_REFRESH_TOKEN as a Render env var after first auth
 let tokenStore = {
@@ -254,6 +263,90 @@ app.post('/canva/create', async (req, res) => {
   }
 });
 
+// ─── LOOMLY (CONTENT CALENDAR) ────────────────────────────────────────────────
+
+// Pull posts from a Loomly calendar. Cached 15 min. Server proxies the API so
+// the key stays out of the browser. Auto-disables if LOOMLY_API_KEY isn't set.
+async function fetchLoomlyPosts() {
+  if (!LOOMLY_API_KEY) throw new Error('loomly_not_configured');
+
+  // Reasonable date range: last 7 days through next 30 days
+  const now = new Date();
+  const start = new Date(now); start.setDate(start.getDate() - 7);
+  const end   = new Date(now); end.setDate(end.getDate() + 30);
+  const iso = (d) => d.toISOString().split('T')[0];
+
+  const url = `${LOOMLY_API}/calendars/${LOOMLY_CALENDAR_ID}/posts`
+    + `?start_date=${iso(start)}&end_date=${iso(end)}&limit=200`;
+
+  const r = await fetch(url, {
+    headers: {
+      'Authorization': `Bearer ${LOOMLY_API_KEY}`,
+      'Accept':        'application/json',
+    },
+  });
+
+  if (!r.ok) {
+    const txt = await r.text();
+    throw new Error(`Loomly API ${r.status}: ${txt.slice(0, 200)}`);
+  }
+
+  const data = await r.json();
+  // Normalize each post to the shape the command center expects
+  const posts = (data.posts || data || []).map(p => ({
+    id:        p.id,
+    title:     p.title || p.subject || '',
+    date:      p.scheduled_date || p.publish_date || p.date,
+    time:      p.scheduled_time || null,
+    platforms: (p.platforms || []).map(x => typeof x === 'string' ? x : x.name),
+    status:    p.status || p.workflow_state || 'draft',
+    label:     p.label || p.category || null,
+    url:       p.url || null,
+  }));
+  return posts;
+}
+
+app.get('/loomly/calendar', async (req, res) => {
+  if (!LOOMLY_API_KEY) {
+    return res.status(503).json({
+      configured: false,
+      message: 'Add LOOMLY_API_KEY to Render environment variables to enable Loomly integration.',
+    });
+  }
+
+  // Serve from cache if fresh
+  if (loomlyCache.posts && Date.now() - loomlyCache.fetchedAt < LOOMLY_CACHE_MS) {
+    return res.json({ configured: true, cached: true, fetchedAt: loomlyCache.fetchedAt, posts: loomlyCache.posts });
+  }
+
+  try {
+    const posts = await fetchLoomlyPosts();
+    loomlyCache = { posts, fetchedAt: Date.now() };
+    res.json({ configured: true, cached: false, fetchedAt: loomlyCache.fetchedAt, posts });
+  } catch (err) {
+    console.error('  Loomly fetch error:', err.message);
+    res.status(500).json({ configured: true, error: err.message });
+  }
+});
+
+app.get('/loomly/refresh', async (req, res) => {
+  if (!LOOMLY_API_KEY) return res.status(503).json({ error: 'loomly_not_configured' });
+  try {
+    const posts = await fetchLoomlyPosts();
+    loomlyCache = { posts, fetchedAt: Date.now() };
+    res.json({ refreshed: true, fetchedAt: loomlyCache.fetchedAt, count: posts.length });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/loomly/status', (req, res) => {
+  res.json({
+    configured: !!LOOMLY_API_KEY,
+    calendarId: LOOMLY_CALENDAR_ID,
+    cached:     !!loomlyCache.posts,
+    fetchedAt:  loomlyCache.fetchedAt || null,
+  });
+});
+
 // ─── HEALTH ───────────────────────────────────────────────────────────────────
 app.get('/', (req, res) => {
   res.json({
@@ -265,12 +358,19 @@ app.get('/', (req, res) => {
       authorized: !!(tokenStore.refreshToken),
       authUrl:    'GET /canva/auth',
     },
+    loomly: {
+      configured: !!LOOMLY_API_KEY,
+      calendarId: LOOMLY_CALENDAR_ID,
+    },
     endpoints: {
-      conditions:   'GET  /conditions.json',
-      refresh:      'GET  /refresh',
-      canvaAuth:    'GET  /canva/auth     — authorize Canva (do once)',
-      canvaStatus:  'GET  /canva/status',
-      canvaCreate:  'POST /canva/create   { headline, body, label }',
+      conditions:    'GET  /conditions.json',
+      refresh:       'GET  /refresh',
+      canvaAuth:     'GET  /canva/auth     — authorize Canva (do once)',
+      canvaStatus:   'GET  /canva/status',
+      canvaCreate:   'POST /canva/create   { headline, body, label }',
+      loomlyCalendar:'GET  /loomly/calendar — scheduled posts from Loomly',
+      loomlyRefresh: 'GET  /loomly/refresh  — force re-pull (bypass 15min cache)',
+      loomlyStatus:  'GET  /loomly/status',
     },
   });
 });
@@ -288,6 +388,7 @@ refreshData().then(() => {
     if (authorized) {
       console.log(`  ✓ Canva authorized and ready`);
     }
+    console.log(`  Loomly: ${LOOMLY_API_KEY ? '✓ key set (calendar ' + LOOMLY_CALENDAR_ID + ')' : '✗ add LOOMLY_API_KEY to enable'}`);
   });
 });
 
