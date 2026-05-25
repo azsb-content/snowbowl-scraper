@@ -292,13 +292,17 @@ async function fetchLoomlyPosts() {
   }
 
   const data = await r.json();
-  // Normalize each post to the shape the command center expects
+  // Normalize each post to the shape the command center expects.
+  // CAPTION TEXT is required for the front-end auto-import into POST_LOG,
+  // so we expose it under all common Loomly field names (caption/body/text/content).
   const posts = (data.posts || data || []).map(p => ({
     id:        p.id,
     title:     p.title || p.subject || '',
+    caption:   p.caption || p.body || p.text || p.content || p.message || '',
     date:      p.scheduled_date || p.publish_date || p.date,
     time:      p.scheduled_time || null,
     platforms: (p.platforms || []).map(x => typeof x === 'string' ? x : x.name),
+    platform:  Array.isArray(p.platforms) && p.platforms[0] ? (typeof p.platforms[0] === 'string' ? p.platforms[0] : p.platforms[0].name) : null,
     status:    p.status || p.workflow_state || 'draft',
     label:     p.label || p.category || null,
     url:       p.url || null,
@@ -345,6 +349,34 @@ app.get('/loomly/status', (req, res) => {
     cached:     !!loomlyCache.posts,
     fetchedAt:  loomlyCache.fetchedAt || null,
   });
+});
+
+// ─── LIVE ALERTS PROXY ────────────────────────────────────────────────────────
+// Snowbowl's alerts JSON doesn't send CORS headers, so the browser can't fetch
+// it directly. This endpoint proxies it server-side and serves it with CORS
+// open. Cached 60s — alerts can flip in minutes during monsoon ops.
+const ALERTS_URL = 'https://www.snowbowl.ski/wp-content/uploads/sites/9/m-json/alerts.json';
+let alertsCache = { data: null, fetchedAt: 0 };
+const ALERTS_CACHE_MS = 60 * 1000; // 1 minute
+
+app.get('/snowbowl/alerts', async (req, res) => {
+  try {
+    if (alertsCache.data && Date.now() - alertsCache.fetchedAt < ALERTS_CACHE_MS) {
+      return res.json({ cached: true, fetchedAt: alertsCache.fetchedAt, alerts: alertsCache.data });
+    }
+    const r = await fetch(ALERTS_URL, { headers: { 'User-Agent': 'snowbowl-scraper/1.0' } });
+    if (!r.ok) throw new Error(`alerts ${r.status}`);
+    const data = await r.json();
+    alertsCache = { data, fetchedAt: Date.now() };
+    res.json({ cached: false, fetchedAt: alertsCache.fetchedAt, alerts: data });
+  } catch (err) {
+    console.error('  Alerts fetch error:', err.message);
+    // If we have ANY cached data, serve it even if stale
+    if (alertsCache.data) {
+      return res.json({ cached: true, stale: true, fetchedAt: alertsCache.fetchedAt, alerts: alertsCache.data });
+    }
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ─── HEALTH ───────────────────────────────────────────────────────────────────
