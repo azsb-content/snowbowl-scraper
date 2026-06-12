@@ -51,20 +51,21 @@ async function refreshData() {
     console.error(`  Feed collection error: ${err.message}`);
   }
 
-  // BEST-EFFORT ENRICHMENT: try the old Playwright scrape; if Cloudflare
-  // ever unblocks us, page-scraped fields (snow table, real gondola
-  // schedule text) overwrite the derived ones. Never blocks the feeds data.
+  // BEST-EFFORT ENRICHMENT: the Playwright scrape works only when Cloudflare
+  // lets it through (intermittent). FEEDS REMAIN CANON — the events API and
+  // derived summer ops are cleaner than page-scraped text (20 structured
+  // events vs ~6; page sunsetLine picks up promo-banner garbage). The page
+  // scrape only contributes what feeds can't provide: the winter snow-totals
+  // table and on-page announcements.
   try {
     const scraped = await scrapeSnowReport();
-    if (scraped && (scraped.raw.length > 0 || scraped.events.length > 0 || scraped.summerOps)) {
-      if (scraped.raw.length)  { cachedData.raw = scraped.raw; cachedData.parsed = scraped.parsed; }
-      if (scraped.events.length) cachedData.events = scraped.events;
-      if (scraped.summerOps)     cachedData.summerOps = { ...scraped.summerOps, derived: false };
-      if (scraped.announcement)  cachedData.announcement = scraped.announcement;
+    if (scraped && (scraped.raw.length > 0 || scraped.announcement)) {
+      if (scraped.raw.length)   { cachedData.raw = scraped.raw; cachedData.parsed = scraped.parsed; }
+      if (scraped.announcement && !cachedData.announcement) cachedData.announcement = scraped.announcement;
       cachedData.source = 'snowbowl.ski (feeds + page scrape)';
-      console.log('  Playwright enrichment succeeded.');
+      console.log('  Playwright enrichment: snow table/announcement merged.');
     } else {
-      console.log('  Playwright returned empty (Cloudflare block) — feeds data stands.');
+      console.log('  Playwright contributed nothing this round — feeds data stands.');
     }
   } catch (err) {
     console.log(`  Playwright enrichment skipped: ${err.message}`);
