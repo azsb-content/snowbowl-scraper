@@ -1,5 +1,6 @@
 const express = require('express');
 const { scrapeSnowReport } = require('./scraper');
+const { collectFromFeeds } = require('./feeds');
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
@@ -37,13 +38,36 @@ let lastScrape = 0;
 const SCRAPE_INTERVAL = 30 * 60 * 1000; // 30 minutes
 
 async function refreshData() {
-  console.log(`[${new Date().toISOString()}] Scraping snowbowl.ski...`);
+  console.log(`[${new Date().toISOString()}] Collecting snowbowl.ski data (JSON feeds)...`);
+  // PRIMARY: JSON feeds — Cloudflare blocks page routes for datacenter IPs,
+  // so Playwright page scraping returns empty from Render. The feeds
+  // (m-json/weather.json, tribe events API, m-json/alerts.json) live on
+  // paths the WAF leaves open and carry better-structured data anyway.
   try {
-    cachedData = await scrapeSnowReport();
+    cachedData = await collectFromFeeds();
     lastScrape = Date.now();
-    console.log(`  Success. ${cachedData.raw.length} fields scraped.`);
+    console.log(`  Feeds OK. events=${cachedData.events.length}`);
   } catch (err) {
-    console.error(`  Scrape error: ${err.message}`);
+    console.error(`  Feed collection error: ${err.message}`);
+  }
+
+  // BEST-EFFORT ENRICHMENT: try the old Playwright scrape; if Cloudflare
+  // ever unblocks us, page-scraped fields (snow table, real gondola
+  // schedule text) overwrite the derived ones. Never blocks the feeds data.
+  try {
+    const scraped = await scrapeSnowReport();
+    if (scraped && (scraped.raw.length > 0 || scraped.events.length > 0 || scraped.summerOps)) {
+      if (scraped.raw.length)  { cachedData.raw = scraped.raw; cachedData.parsed = scraped.parsed; }
+      if (scraped.events.length) cachedData.events = scraped.events;
+      if (scraped.summerOps)     cachedData.summerOps = { ...scraped.summerOps, derived: false };
+      if (scraped.announcement)  cachedData.announcement = scraped.announcement;
+      cachedData.source = 'snowbowl.ski (feeds + page scrape)';
+      console.log('  Playwright enrichment succeeded.');
+    } else {
+      console.log('  Playwright returned empty (Cloudflare block) — feeds data stands.');
+    }
+  } catch (err) {
+    console.log(`  Playwright enrichment skipped: ${err.message}`);
   }
 }
 
