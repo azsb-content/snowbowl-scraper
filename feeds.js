@@ -104,6 +104,10 @@ async function collectFromFeeds() {
         name: decodeEntities(e.title),
         date,
         time,
+        // Machine-readable start (Phoenix local wall time) + all-day flag —
+        // consumed by the agent surface (/brief.json daysOut, /events.ics).
+        startISO: e.start_date ? String(e.start_date).replace(' ', 'T') : null,
+        allDay: !!e.all_day,
         price: e.cost ? decodeEntities(e.cost) : '',
         url: e.url || null,
         desc: decodeEntities(String(e.description || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()).slice(0, 400),

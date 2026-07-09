@@ -1,6 +1,7 @@
 const express = require('express');
 const { scrapeSnowReport } = require('./scraper');
 const { collectFromFeeds } = require('./feeds');
+const agent = require('./agent');
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
@@ -404,6 +405,115 @@ app.get('/snowbowl/alerts', async (req, res) => {
   }
 });
 
+// ─── AGENT SURFACE (brief + heat + ICS) ───────────────────────────────────────
+// Public machine-readable surfaces for scheduled agents (Cowork): a morning
+// brief, the Phoenix-vs-mountain heat delta, and a subscribable marketing
+// calendar. Bodies are built by the pure functions in agent.js; this section
+// only owns I/O. brief + ICS are pure derivations of the existing 30-min feed
+// cache; heat adds exactly ONE new cached upstream (Phoenix NOAA, 15-min TTL,
+// stale-on-error). Public data only — snowbowl.ski feeds, NOAA, published
+// powerpass.ski facts. GET-only, no secrets, no team data.
+
+// Deep links land on the command center; Dylan's signed-in browser applies
+// them on load. Default host verified against the app repo's render.yaml
+// (Render static site `snowbowl-command-center`).
+const APP_URL = process.env.APP_URL || 'https://snowbowl-command-center.onrender.com';
+
+// Phoenix NOAA (api.weather.gov) — same point the app's Heat Gap tab uses.
+const PHX_POINT = { lat: 33.4342, lon: -112.0080 }; // Phoenix Sky Harbor
+let phxUrls = null; // memoized points-API forecast URLs (stable per point)
+let phxCache = { data: null, fetchedAt: 0 };
+const PHX_CACHE_MS = 15 * 60 * 1000; // 15 minutes
+// NOAA 403s requests without a User-Agent — contact info per their API docs.
+const NOAA_HEADERS = { 'User-Agent': 'snowbowl-scraper/2.0 (dheckert@snowbowl.ski)', Accept: 'application/geo+json' };
+
+async function getPhx() {
+  if (phxCache.data && Date.now() - phxCache.fetchedAt < PHX_CACHE_MS) {
+    return { ...phxCache.data, stale: false };
+  }
+  try {
+    if (!phxUrls) {
+      const pr = await fetch(`https://api.weather.gov/points/${PHX_POINT.lat},${PHX_POINT.lon}`, { headers: NOAA_HEADERS });
+      if (!pr.ok) throw new Error(`points ${pr.status}`);
+      const props = (await pr.json()).properties || {};
+      if (!props.forecastHourly || !props.forecast) throw new Error('points response missing forecast URLs');
+      phxUrls = { hourly: props.forecastHourly, daily: props.forecast };
+    }
+    const [hr, dr] = await Promise.all([
+      fetch(phxUrls.hourly, { headers: NOAA_HEADERS }),
+      fetch(phxUrls.daily,  { headers: NOAA_HEADERS }),
+    ]);
+    if (!hr.ok) throw new Error(`hourly ${hr.status}`);
+    if (!dr.ok) throw new Error(`forecast ${dr.status}`);
+    const hj = await hr.json();
+    const dj = await dr.json();
+
+    // Current temp MUST come from the HOURLY forecast's first period —
+    // daily periods are highs/lows, not "right now".
+    const first = ((hj.properties || {}).periods || [])[0] || null;
+    const tempNow = first ? agent.numOrNull(first.temperature) : null;
+    const short = first ? (first.shortForecast || null) : null;
+
+    const daily = ((dj.properties || {}).periods || [])
+      .filter((p) => p && p.isDaytime)
+      .map((p) => ({
+        date: String(p.startTime || '').slice(0, 10),
+        high: agent.numOrNull(p.temperature),
+        label: p.name || '',
+      }));
+    // After ~6pm NOAA drops today's daytime period ("Tonight" leads) — then
+    // highToday is null, never a guess.
+    const today = daily.find((p) => p.date === agent.phxDateKey(new Date()));
+
+    phxCache = {
+      data: { tempNow, short, highToday: today ? today.high : null, daily, fetchedAt: Date.now() },
+      fetchedAt: Date.now(),
+    };
+    console.log(`  Phoenix NOAA OK. now=${tempNow}°, high=${today ? today.high : '—'}°`);
+    return { ...phxCache.data, stale: false };
+  } catch (err) {
+    console.error('  Phoenix NOAA error:', err.message);
+    // Serve stale if we have ANYTHING; otherwise null — NEVER a fabricated temp.
+    if (phxCache.data) return { ...phxCache.data, stale: true };
+    return null;
+  }
+}
+
+// Morning brief — everything a scheduled agent needs in one GET.
+app.get('/brief.json', async (req, res) => {
+  if (!cachedData || Date.now() - lastScrape > SCRAPE_INTERVAL) await refreshData();
+  res.set('Cache-Control', 'public, max-age=300');
+  const now = new Date();
+  // The heat block reads the NOAA cache PASSIVELY — fresh + in season, or
+  // null. The brief never triggers a NOAA fetch.
+  const phxFresh =
+    agent.inHeatSeason(now) && phxCache.data && Date.now() - phxCache.fetchedAt < PHX_CACHE_MS
+      ? phxCache.data
+      : null;
+  res.json(agent.buildBrief(cachedData, now, phxFresh));
+});
+
+// Heat delta — Phoenix (NOAA) vs mountain (existing feed cache: zero new
+// snowbowl.ski traffic). Season-gated so NOAA is never called off-season.
+app.get('/heat.json', async (req, res) => {
+  res.set('Cache-Control', 'public, max-age=300');
+  const now = new Date();
+  if (!agent.inHeatSeason(now)) {
+    return res.json(agent.buildHeatBody(null, null, now)); // season gate FIRST — no NOAA call
+  }
+  const phx = await getPhx();
+  res.json(agent.buildHeatBody(cachedData, phx, now));
+});
+
+// Marketing-dates calendar — resort events, 3-days-ahead draft windows, and
+// the 14th-of-month payment-plan reel series. Subscribable (Google/Apple).
+app.get('/events.ics', async (req, res) => {
+  if (!cachedData || Date.now() - lastScrape > SCRAPE_INTERVAL) await refreshData();
+  res.set('Content-Type', 'text/calendar; charset=utf-8');
+  res.set('Cache-Control', 'public, max-age=900');
+  res.send(agent.buildEventsIcs(cachedData, new Date(), APP_URL));
+});
+
 // ─── HEALTH ───────────────────────────────────────────────────────────────────
 app.get('/', (req, res) => {
   res.json({
@@ -422,6 +532,10 @@ app.get('/', (req, res) => {
     endpoints: {
       conditions:    'GET  /conditions.json',
       refresh:       'GET  /refresh',
+      alerts:        'GET  /snowbowl/alerts — live ops alerts proxy (CORS open)',
+      brief:         'GET  /brief.json     — agent morning brief: conditions, events, pass cadence, draft suggestions',
+      heat:          'GET  /heat.json      — Phoenix-vs-mountain heat delta (Jun 1 – Aug 31)',
+      eventsIcs:     'GET  /events.ics     — subscribable marketing-dates calendar (events, draft windows, reel days)',
       canvaAuth:     'GET  /canva/auth     — authorize Canva (do once)',
       canvaStatus:   'GET  /canva/status',
       canvaCreate:   'POST /canva/create   { headline, body, label }',
