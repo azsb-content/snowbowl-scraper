@@ -594,11 +594,376 @@ function buildEventsIcs(cachedData, now = new Date(), appUrl = '') {
   return lines.map(foldLine).join('\r\n') + '\r\n';
 }
 
+// ─── /offerings.json body ─────────────────────────────────────────────────────
+// The OFFERING FACT BRAIN — public product facts only (no feed, no NOAA, no
+// team/guest data, no PII). This is the ONE agent endpoint with no I/O: every
+// value below is a static constant, so the route answers INSTANTLY even during a
+// Render cold start (nothing to refresh).
+//
+// MIRROR — the app is the source of truth. When these change, update this block
+// AND docs/AUTOMATION.md §6 in the same commit:
+//   FACTS / FACT_PHRASES      ↔ app/src/lib/facts.ts
+//   OFFERINGS (public subset) ↔ app/src/lib/offerings.ts (id, name, eyebrow,
+//     sunset, whatItIs, facts[], angles[], titleIdeas[], storyBody, heroStat).
+// Only the PUBLIC product fields are mirrored — the app's LLM-context helpers
+// (offeringContext / offeringStoryFrame) are NOT part of the surface.
+
+// FACTS — single source of truth for prices/dates that drift (mirror facts.ts).
+const FACTS = {
+  // Power Pass
+  passAdultFrom:     '$349',
+  paymentPlanFrom:   '$13/month',
+  passHeldSinceYear: 2023,
+  passMountains:     12,
+  // Family Fridays
+  familyFridayAdult:  '$59',
+  familyFridayKid:    '$39',
+  familyFridayWindow: 'May 22–August 7',
+  // Gondola + activities
+  bowlBucks:      '$10',
+  sunsetRideFrom: '$19',
+  gondolaFrom:    '$3',
+  // Elevation (feet): summitFt = top of the gondola (11,500); agassizFt =
+  // Agassiz Lodge, mountain dining + activities (9,500).
+  summitFt:  11500,
+  agassizFt: 9500,
+};
+
+// Pre-built phrases so the WORDING stays consistent too (mirror facts.ts).
+const FACT_PHRASES = {
+  passValue:     `${FACTS.passMountains} mountains on one pass, kids 12 and under ski free, adult passes from ${FACTS.passAdultFrom}`,
+  heldSince:     `prices held since ${FACTS.passHeldSinceYear}`,
+  paymentPlan:   `payment plans from ${FACTS.paymentPlanFrom}`,
+  familyFridays: `Every Friday, ${FACTS.familyFridayWindow}: all-day unlimited activities, unlimited gondola rides, and treasure panning. Adults ${FACTS.familyFridayAdult}, kids 12 and under ${FACTS.familyFridayKid}`,
+};
+
+// Deterministic thousands separator — the app builds these strings with
+// Number#toLocaleString(); reproduce "11,500"/"9,500" here WITHOUT depending on
+// the server's default ICU locale (which is not guaranteed to be en-US).
+function withCommas(n) {
+  return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
+
+// OFFERINGS — public product fields only (mirror offerings.ts OFFERINGS). Strings
+// interpolate the local FACTS above exactly as the app does, so a FACTS bump
+// updates every offering line in lockstep (no drifting hardcoded prices/dates).
+const OFFERINGS = [
+  {
+    id: 'gondola',
+    name: 'Scenic Gondola + Activities',
+    eyebrow: 'TOP OF ARIZONA',
+    whatItIs: `Arizona's only gondola. Eight minutes to the top of the state. Scenic rides, tubing, climbing wall, bungee, mini golf, treasure panning — a full mountain day from the base to 11,500 feet.`,
+    facts: [
+      `Gondola rides from ${FACTS.gondolaFrom}`,
+      `Buy online for ${FACTS.bowlBucks} Bowl Bucks back`,
+      `${withCommas(FACTS.summitFt)} ft summit — Grand Canyon on clear days`,
+      'Open daily through summer',
+    ],
+    angles: [
+      'Eight minutes to the top of Arizona.',
+      '70-mile views on a clear day.',
+      'A full mountain day for every age.',
+      "When Phoenix hits 100°, up here it's 65.",
+    ],
+    titleIdeas: ['TOP OF\nARIZONA', 'EIGHT\nMINUTES UP', 'ONLY IN\nARIZONA', 'COOL OFF\nUP HIGH'],
+    storyBody: 'SCENIC RIDES TO\n11,500 FEET',
+    heroStat: { value: '11,500', label: 'FEET UP' },
+  },
+  {
+    id: 'sunset',
+    name: 'Sunset Dinners',
+    eyebrow: 'SUNSET DINNERS',
+    sunset: true,
+    whatItIs: `Sunset gondola rides paired with dinner by our chef at Agassiz Lodge (${withCommas(FACTS.agassizFt)} ft), Friday and Saturday evenings.`,
+    facts: [
+      'Friday + Saturday evenings',
+      `Dinner at Agassiz Lodge, ${withCommas(FACTS.agassizFt)} ft`,
+      `Sunset gondola rides from ${FACTS.sunsetRideFrom}`,
+      'Reservations recommended',
+    ],
+    angles: [
+      'Two hours from Phoenix, no other restaurant this cold and this high.',
+      'Sunset rides to 11,500, then dinner while the valley turns.',
+      'The only gondola dinner in Arizona. Friday and Saturday only.',
+      'Thirty degrees cooler than town, gold light, no haze.',
+    ],
+    titleIdeas: ['DINNER\nWITH A VIEW', 'GOLDEN\nHOUR', "ARIZONA'S\nHIGHEST TABLE", 'SUNSET\nAT THE TOP'],
+    storyBody: 'SUNSET RIDES AND DINNER\nFRIDAY AND SATURDAY',
+    heroStat: { value: '9,500', label: 'FEET AT SUNSET' },
+  },
+  {
+    id: 'family',
+    name: 'Family Fridays',
+    eyebrow: 'FAMILY FRIDAYS',
+    whatItIs: `Every Friday (${FACTS.familyFridayWindow}): unlimited all-day activities, unlimited gondola rides, and treasure panning.`,
+    facts: [
+      `Every Friday, ${FACTS.familyFridayWindow}`,
+      'Unlimited activities + gondola',
+      'Treasure panning included',
+      `Adults ${FACTS.familyFridayAdult}, kids 12 & under ${FACTS.familyFridayKid}`,
+    ],
+    angles: [
+      'Every Friday: one price, unlimited rides and activities, all day.',
+      'The one deal families actually plan around.',
+      'Cool air and tubing until the kids crash.',
+      'Unlimited gondola, unlimited activities, one family-sized price.',
+    ],
+    titleIdeas: ['FAMILY\nFRIDAYS', 'UNLIMITED\nFRIDAY', 'EVERY\nFRIDAY', 'ONE PRICE\nALL DAY'],
+    storyBody: 'UNLIMITED RIDES AND\nACTIVITIES ALL DAY',
+    heroStat: { value: 'UNLIMITED', label: 'EVERY FRIDAY' },
+  },
+  {
+    id: 'pass',
+    name: 'Power Pass',
+    eyebrow: 'POWER PASS',
+    whatItIs: `The Power Pass — ${FACTS.passMountains} mountains, prices locked since ${FACTS.passHeldSinceYear}, kids 12 and under ski free, payment plans from ${FACTS.paymentPlanFrom}.`,
+    facts: [
+      `Adult passes from ${FACTS.passAdultFrom}`,
+      `${FACTS.passMountains} mountains on one pass`,
+      `Payment plans from ${FACTS.paymentPlanFrom}`,
+      `Prices held since ${FACTS.passHeldSinceYear}`,
+    ],
+    angles: [
+      `Prices held since ${FACTS.passHeldSinceYear} — summer's the time to lock in.`,
+      'Next winter costs less when you buy now.',
+      `Payment plans as low as ${FACTS.paymentPlanFrom} — spread the cost.`,
+      `${FACTS.passMountains} mountains, one price, kids free, locked.`,
+    ],
+    titleIdeas: ['ONE PASS\n12 MOUNTAINS', 'KIDS\nSKI FREE', 'NEXT WINTER\nSTARTS NOW', 'LOCK IN\nTODAY'],
+    storyBody: '12 MOUNTAINS, ONE PASS\nKIDS SKI FREE',
+    heroStat: { value: '12', label: 'MOUNTAINS ONE PASS' },
+  },
+  {
+    id: 'disc-golf',
+    name: 'Alpine Disc Golf',
+    eyebrow: 'DISC GOLF',
+    whatItIs: "Arizona's highest disc golf — a free 18-hole course in the pines at 9,300 ft, with cool air and mountain views. Bring your own disc or rent one.",
+    facts: [
+      'Free 18-hole course on the mountain',
+      'Open daily through summer',
+      '9,300 ft — cool air and mountain views',
+      "Home of the Brewer's Cup Disc Golf Tournament",
+    ],
+    angles: [
+      'Free 18 holes in the pines at 9,300 feet — no greens fees.',
+      'Cooler air, mountain views, zero crowds.',
+      'Bring a disc or rent one and play all day.',
+      'The highest disc golf course in Arizona.',
+    ],
+    titleIdeas: ['FREE ROUNDS\nAT ELEVATION', 'DISC GOLF\nIN THE PINES', '9,300 FEET\nOF FAIRWAYS', 'COOL OFF\nUP HIGH'],
+    storyBody: '18 HOLES\nZERO GREENS FEES',
+    heroStat: { value: 'FREE', label: '18 HOLES' },
+  },
+  {
+    id: 'basecamp',
+    name: 'Basecamp Lodging',
+    eyebrow: 'STAY ON THE MOUNTAIN',
+    whatItIs: "Basecamp at Snowbowl — cabins and rooms at 9,300 ft with a full restaurant and bar, on-site recreation, and a free scenic gondola ride for every guest each night. Pet-friendly.",
+    facts: [
+      '22 cabins, including the historic Clark Gable cabin',
+      'One free scenic gondola ride per guest, per night',
+      'Full restaurant and bar on-site, open daily',
+      'Pet-friendly — $15 per pet, per night',
+      `Passholders: 15% off lodging plus ${FACTS.bowlBucks} Bowl Bucks`,
+    ],
+    angles: [
+      'Sleep at 9,300 feet. Wake up to a free gondola ride.',
+      'Full restaurant on-site — no drive down the mountain for dinner.',
+      'Pet-friendly cabins with firepits and mountain air.',
+      'The only way to stay the night at the top of Arizona.',
+    ],
+    titleIdeas: ['STAY ON\nTHE MOUNTAIN', 'MOUNTAIN\nNIGHTS', 'SLEEP UP\nHERE', 'CABINS AT\n9,300 FEET'],
+    storyBody: 'CABINS AT 9,300 FEET\nFREE GONDOLA NIGHTLY',
+    heroStat: { value: '9,300', label: 'FEET UP' },
+  },
+  {
+    id: 'group-events',
+    name: 'Group Outings',
+    eyebrow: 'BRING YOUR CREW',
+    whatItIs: "Private group outings and team retreats at 9,300 ft — activities, dining, and lodging in one place, with full-service catering from casual BBQ to elegant dinners.",
+    facts: [
+      'Cabins, catering, and activities in one place',
+      'Full-service catering — boxed lunches to smoked BBQ to plated dinners',
+      'Unlimited summer activities for the group',
+      'Reserve the on-site restaurant for private events',
+    ],
+    angles: [
+      'Cool air and altitude for team focus — 30 degrees cooler than Phoenix.',
+      'All-day activities built in: tubing, climbing wall, mini golf, gondola.',
+      'One venue: cabins, food, activities, mountain views.',
+      'Custom catering, casual to elegant.',
+    ],
+    titleIdeas: ['BRING YOUR\nCREW', 'TEAM RETREAT\nAT ALTITUDE', 'GROUP GOALS\nMOUNTAIN AIR', 'TOGETHER\nUP HERE'],
+    storyBody: 'ONE VENUE\nEVERYTHING INCLUDED',
+  },
+  {
+    id: 'weddings',
+    name: 'Mountain Weddings',
+    eyebrow: 'ELEVATION AND ELEGANCE',
+    whatItIs: "Full-service mountain weddings at 9,300 ft — indoor and outdoor ceremony spaces, on-site catering from rehearsal to reception, and Basecamp lodging for guests.",
+    facts: [
+      'Indoor and outdoor ceremony and reception spaces',
+      'Full-service catering, rehearsal dinner through reception',
+      'On-mountain lodging at Basecamp for guests',
+      'Now booking 2026 and 2027',
+    ],
+    angles: [
+      'Exchange vows at 9,300 feet with the Peaks as your backdrop.',
+      'Chef-crafted catering from rehearsal through reception.',
+      'Guests sleep on the mountain — no long drive after dancing.',
+      'Altitude, views, and full service in one rare venue.',
+    ],
+    titleIdeas: ['VOWS AT\nELEVATION', 'WEDDING IN\nTHE PEAKS', 'PEAKS AND\nVOWS', 'I DO\nUP HERE'],
+    storyBody: 'VOWS AT 9,300 FEET\nRECEPTION AND LODGING',
+    heroStat: { value: '9,300', label: 'FEET UP' },
+  },
+  {
+    id: 'vr-skiing',
+    name: 'Summer VR Skiing',
+    eyebrow: 'DOWNHILL IN SUMMER',
+    whatItIs: `Immersive 15-minute virtual-reality ski runs at Agassiz Lodge (${withCommas(FACTS.agassizFt)} ft) — practice your line, race friends, or ski summer pow with no snow. Ages 7+.`,
+    facts: [
+      '15-minute VR ski runs, daily in summer',
+      '$10 weekdays, $15 weekends',
+      'Ages 7 and up, 55–250 lbs',
+      `At Agassiz Lodge, ${withCommas(FACTS.agassizFt)} ft`,
+    ],
+    angles: [
+      'Ski virtual pow without waiting for snow.',
+      'Practice your line in summer, ski it in winter.',
+      'Race a friend down the same run.',
+      'Fifteen minutes of downhill at 9,500 feet.',
+    ],
+    titleIdeas: ['SKI SUMMER\nPOW', 'VIRTUAL\nDOWNHILL', 'RACE YOUR\nFRIENDS', 'SKI WITH\nNO SNOW'],
+    storyBody: '15-MINUTE SKI RUNS\nANY SEASON',
+    heroStat: { value: '15 MIN', label: 'SKI RUNS' },
+  },
+  {
+    id: 'lessons',
+    name: 'Ski & Ride School',
+    eyebrow: 'LEARN TO SKI AND RIDE',
+    whatItIs: "Ski & Ride School group lessons for every age and ability — never-ever beginners to advanced, with certified instructors and gear-included options.",
+    facts: [
+      'Group lessons for all ages and abilities',
+      'Never-ever beginner options for first-timers',
+      'Gear-included lesson packages available',
+      'Certified instructors, small groups',
+    ],
+    angles: [
+      'From the bunny hill to the lift in one day.',
+      'Certified instructors, small groups, every level.',
+      'Rent gear and take a lesson — walk in with nothing.',
+      "Kids progress fast on Snowbowl's beginner terrain.",
+    ],
+    titleIdeas: ['LEARN TO\nSKI TODAY', 'FIRST CHAIR\nFIRST TIME', 'BUNNY TO\nBLUE RUN', 'EVERY LEVEL\nWELCOME'],
+    storyBody: 'ALL AGES AND ABILITIES\nCERTIFIED INSTRUCTORS',
+  },
+  {
+    id: 'rentals',
+    name: 'Rentals',
+    eyebrow: 'RENT AND RIDE',
+    whatItIs: "Full equipment rentals — skis, snowboards, boots, and helmets — so you can show up with nothing and still ride. Demo gear available.",
+    facts: [
+      'Skis, boards, boots, and helmets available',
+      'Show up with nothing and still ride',
+      'Demo gear to try before you buy',
+    ],
+    angles: [
+      'Show up in jeans. Ride in boots.',
+      'Demo the latest skis and boards before you buy.',
+      'Helmets and gear included.',
+      'A few hours from Phoenix, zero gear needed.',
+    ],
+    titleIdeas: ['NO GEAR\nNO PROBLEM', 'RENT AND\nRIDE TODAY', 'EVERYTHING\nINCLUDED', 'SHOW UP\nSKI NOW'],
+    storyBody: 'FULL RENTAL SHOP\nSHOW UP AND RIDE',
+    heroStat: { value: 'NO GEAR', label: 'NO PROBLEM' },
+  },
+  {
+    id: 'lift-ticket',
+    name: 'Lift Tickets',
+    eyebrow: 'SKI AND RIDE',
+    whatItIs: "Day-pass lift tickets for the winter season — all-day access to open terrain and the gondola. Also on the Power Pass, weather permitting.",
+    facts: [
+      'All-day lift access for the ski season',
+      'Season runs late fall through spring, weather permitting',
+      `Or ride on the Power Pass — ${FACTS.passMountains} mountains, kids 12 & under ski free`,
+    ],
+    angles: [
+      'One day, unlimited terrain.',
+      'Spring corn snow through deep winter pow.',
+      'Weekdays are yours — beat the weekend crowds.',
+      'The top of Arizona, lift-served.',
+    ],
+    titleIdeas: ['SKI\nTODAY', 'ALL DAY\nON THE HILL', 'LIFTS ARE\nSPINNING', 'FRESH SNOW\nWAITS'],
+    storyBody: 'DAY PASS\nUNLIMITED TERRAIN',
+    heroStat: { value: 'ALL DAY', label: 'ONE TICKET' },
+  },
+];
+
+// Offering-of-the-day: DETERMINISTIC daily rotation, seeded by the America/Phoenix
+// day-of-year (never randomizes within a day). WEIGHTED toward the summer hero /
+// anchor offerings per the strategy — Sunset Dinners and Family Fridays heaviest,
+// then the other summer draws — so the pick leans on the anchors but still cycles.
+const OFFERING_OF_DAY_WEIGHTS = { sunset: 4, family: 4, gondola: 2, pass: 2 };
+const HERO_OFFERING_IDS = new Set(['sunset', 'family']);
+
+function phxDayOfYear(now = new Date()) {
+  const { year, month, day } = phxParts(now);
+  return Math.round((Date.UTC(year, month, day) - Date.UTC(year, 0, 1)) / 86400000);
+}
+
+function offeringOfDayReason(o) {
+  const angle = (o.angles && o.angles[0]) || o.whatItIs;
+  return HERO_OFFERING_IDS.has(o.id)
+    ? `${o.name} is a summer anchor — ${angle}`
+    : `Today's rotation: ${o.name}. ${angle}`;
+}
+
+function offeringOfDay(now = new Date()) {
+  const bag = [];
+  for (const o of OFFERINGS) {
+    const w = OFFERING_OF_DAY_WEIGHTS[o.id] || 1;
+    for (let i = 0; i < w; i++) bag.push(o.id);
+  }
+  const doy = phxDayOfYear(now);
+  const id = bag[((doy % bag.length) + bag.length) % bag.length];
+  const o = OFFERINGS.find((x) => x.id === id) || OFFERINGS[0];
+  return { id: o.id, reason: offeringOfDayReason(o) };
+}
+
+// Pure builder for GET /offerings.json. appUrl is threaded through so the per-
+// offering deep links resolve to the live app; when it's '' (unverified host)
+// postsDeepLink returns null and deepLink/captionLink degrade gracefully. No I/O.
+function buildOfferings(now = new Date(), appUrl = '') {
+  return {
+    ok: true,
+    generatedAt: now.toISOString(),
+    facts: { ...FACTS },
+    phrases: { ...FACT_PHRASES },
+    offerings: OFFERINGS.map((o) => ({
+      id: o.id,
+      name: o.name,
+      eyebrow: o.eyebrow,
+      sunset: !!o.sunset,
+      whatItIs: o.whatItIs,
+      facts: o.facts.slice(),
+      angles: o.angles.slice(),
+      titleIdeas: o.titleIdeas.slice(),
+      storyBody: o.storyBody,
+      heroStat: o.heroStat || null,
+      deepLink: postsDeepLink(appUrl, { offering: o.id, mode: 'story' }),
+      captionLink: postsDeepLink(appUrl, { offering: o.id, mode: 'caption' }),
+    })),
+    offeringOfDay: offeringOfDay(now),
+  };
+}
+
 module.exports = {
   // route-body builders
   buildBrief,
   buildHeatBody,
   buildEventsIcs,
+  buildOfferings,
   // date/season/cadence helpers (server.js + smoke tests)
   phxDateKey,
   numOrNull,

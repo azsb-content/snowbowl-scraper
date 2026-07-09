@@ -514,6 +514,15 @@ app.get('/events.ics', async (req, res) => {
   res.send(agent.buildEventsIcs(cachedData, new Date(), APP_URL));
 });
 
+// Offering fact brain — static public product facts + offering-of-the-day +
+// per-offering deep links. NO refreshData(): the body is built from constants
+// only, so this endpoint answers INSTANTLY even during a cold start (the one
+// agent endpoint with no feed dependency). Cached 1h — the facts rarely change.
+app.get('/offerings.json', (req, res) => {
+  res.set('Cache-Control', 'public, max-age=3600');
+  res.json(agent.buildOfferings(new Date(), APP_URL));
+});
+
 // ─── HEALTH ───────────────────────────────────────────────────────────────────
 app.get('/', (req, res) => {
   res.json({
@@ -536,6 +545,7 @@ app.get('/', (req, res) => {
       brief:         'GET  /brief.json     — agent morning brief: conditions, events, pass cadence, draft suggestions',
       heat:          'GET  /heat.json      — Phoenix-vs-mountain heat delta (Jun 1 – Aug 31)',
       eventsIcs:     'GET  /events.ics     — subscribable marketing-dates calendar (events, draft windows, reel days)',
+      offerings:     'GET  /offerings.json — public offering fact brain + offering-of-the-day + per-offering deep links',
       canvaAuth:     'GET  /canva/auth     — authorize Canva (do once)',
       canvaStatus:   'GET  /canva/status',
       canvaCreate:   'POST /canva/create   { headline, body, label }',
