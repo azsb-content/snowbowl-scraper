@@ -73,6 +73,40 @@ async function refreshData() {
   }
 }
 
+// IN-FLIGHT GUARD — refreshData() does a full scrape (3 feed fetches + a
+// Playwright browser launch+navigate), expensive enough that two overlapping
+// calls (a request-triggered background refresh racing the setInterval tick,
+// or two requests landing in the same instant right at cache expiry) would
+// double the load for no benefit. Every caller should go through this wrapper
+// instead of calling refreshData() directly, so at most one scrape runs at a time.
+let refreshPromise = null;
+function refreshDataGuarded() {
+  if (refreshPromise) return refreshPromise;
+  refreshPromise = refreshData()
+    .catch((err) => {
+      // refreshData() already try/catches its own feed + scrape calls, but this
+      // belt-and-suspenders catch guarantees a fire-and-forget background call
+      // (nothing awaiting it) can never produce an unhandled promise rejection.
+      console.error(`  refreshDataGuarded error: ${err.message}`);
+    })
+    .finally(() => { refreshPromise = null; });
+  return refreshPromise;
+}
+
+// STALE-WHILE-REVALIDATE — serve cachedData immediately, even if past
+// SCRAPE_INTERVAL, and kick a background refresh for the NEXT request instead
+// of blocking this one on a full scrape. Only the very first request ever
+// (cachedData still null) blocks on a synchronous refresh.
+async function ensureData() {
+  if (!cachedData) {
+    await refreshDataGuarded();
+    return;
+  }
+  if (Date.now() - lastScrape > SCRAPE_INTERVAL) {
+    void refreshDataGuarded(); // fire-and-forget — don't block this response
+  }
+}
+
 // ─── MIDDLEWARE ───────────────────────────────────────────────────────────────
 app.use(express.json());
 
@@ -86,12 +120,12 @@ app.use((req, res, next) => {
 
 // ─── SNOW CONDITIONS ──────────────────────────────────────────────────────────
 app.get('/conditions.json', async (req, res) => {
-  if (!cachedData || Date.now() - lastScrape > SCRAPE_INTERVAL) await refreshData();
+  await ensureData();
   res.json(cachedData || { error: 'No data available yet', scrapedAt: null, raw: [] });
 });
 
 app.get('/refresh', async (req, res) => {
-  await refreshData();
+  await refreshDataGuarded();
   res.json(cachedData);
 });
 
@@ -481,7 +515,7 @@ async function getPhx() {
 
 // Morning brief — everything a scheduled agent needs in one GET.
 app.get('/brief.json', async (req, res) => {
-  if (!cachedData || Date.now() - lastScrape > SCRAPE_INTERVAL) await refreshData();
+  await ensureData();
   res.set('Cache-Control', 'public, max-age=300');
   const now = new Date();
   // The heat block reads the NOAA cache PASSIVELY — fresh + in season, or
@@ -508,7 +542,7 @@ app.get('/heat.json', async (req, res) => {
 // Marketing-dates calendar — resort events, 3-days-ahead draft windows, and
 // the 14th-of-month payment-plan reel series. Subscribable (Google/Apple).
 app.get('/events.ics', async (req, res) => {
-  if (!cachedData || Date.now() - lastScrape > SCRAPE_INTERVAL) await refreshData();
+  await ensureData();
   res.set('Content-Type', 'text/calendar; charset=utf-8');
   res.set('Cache-Control', 'public, max-age=900');
   res.send(agent.buildEventsIcs(cachedData, new Date(), APP_URL));
@@ -557,7 +591,7 @@ app.get('/', (req, res) => {
 });
 
 // ─── START ────────────────────────────────────────────────────────────────────
-refreshData().then(() => {
+refreshDataGuarded().then(() => {
   app.listen(PORT, () => {
     console.log(`Snowbowl server running on port ${PORT}`);
     const configured = !!(CANVA_CLIENT_ID && CANVA_CLIENT_SECRET);
@@ -573,4 +607,4 @@ refreshData().then(() => {
   });
 });
 
-setInterval(refreshData, SCRAPE_INTERVAL);
+setInterval(refreshDataGuarded, SCRAPE_INTERVAL);
