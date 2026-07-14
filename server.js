@@ -370,7 +370,30 @@ async function fetchLoomlyPosts() {
   return posts;
 }
 
+// CODE-LEVEL AUTH GUARD — this route returns real Loomly post data (draft
+// copy, assignee names/emails) once LOOMLY_API_KEY is set; that's internal
+// team data, not public (see SETUP.md §3a and docs/ADMIN_RUNBOOK.md). Until
+// now the only thing stopping it from going live-and-public was a comment
+// telling an admin to remember to add auth — a real gap a brand-guardian
+// review flagged. Same fail-closed shared-secret pattern as the live
+// loomly-webhook Edge Function: an unset LOOMLY_CALENDAR_SECRET means the
+// route 503s even if LOOMLY_API_KEY gets set, so turning the integration on
+// can never accidentally also turn it public.
+const LOOMLY_CALENDAR_SECRET = process.env.LOOMLY_CALENDAR_SECRET || '';
+function requireLoomlyCalendarSecret(req, res) {
+  if (!LOOMLY_CALENDAR_SECRET) {
+    res.status(503).json({ error: 'loomly_calendar_not_configured', message: 'Set LOOMLY_CALENDAR_SECRET to enable this route.' });
+    return false;
+  }
+  if (req.get('x-loomly-calendar-secret') !== LOOMLY_CALENDAR_SECRET) {
+    res.status(401).json({ error: 'unauthorized' });
+    return false;
+  }
+  return true;
+}
+
 app.get('/loomly/calendar', async (req, res) => {
+  if (!requireLoomlyCalendarSecret(req, res)) return;
   if (!LOOMLY_API_KEY) {
     return res.status(503).json({
       configured: false,
@@ -394,6 +417,7 @@ app.get('/loomly/calendar', async (req, res) => {
 });
 
 app.get('/loomly/refresh', async (req, res) => {
+  if (!requireLoomlyCalendarSecret(req, res)) return;
   if (!LOOMLY_API_KEY) return res.status(503).json({ error: 'loomly_not_configured' });
   try {
     const posts = await fetchLoomlyPosts();
